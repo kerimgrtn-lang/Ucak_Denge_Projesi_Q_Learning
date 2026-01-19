@@ -1,0 +1,180 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import random
+from IPython.display import HTML
+
+# --- 1. PARAMETRELER VE SINIRLAR ---
+alpha = 0.1           # Öğrenme Oranı: Yeni bilginin eski bilginin ne kadar önüne geçeceğini belirler.
+gamma = 0.95          # İndirim Faktörü: Gelecekteki ödüllerin bugünkü değerini belirler.
+epsilon_start = 1.0   # Başlangıçta ajan %100 keşif (explore) yapar (rastgele hareket).
+epsilon_final = 0.01  # Eğitim sonunda ajan %1 oranında rastgele hareket eder.
+decay_rate = 0.996    # Epsilon'un her adımda ne kadar azalacağını (sönümleneceğini) belirler.
+
+episodes = 3000       # Toplam eğitim senaryosu sayısı.
+steps = 60            # Her bir eğitim senaryosunda uçağın yapacağı maksimum hamle sayısı.
+
+# SİSTEM SINIRLARI
+PITCH_LIMIT = 50      # Uçağın dikey eksende (yukarı/aşağı) gidebileceği max açı.
+YAW_LIMIT = 30        # Uçağın yatay eksende (sağ/sol) gidebileceği max açı.
+
+# --- [Q-ALGORİTMASI: TABLO OLUŞTURMA] ---
+# 51 (Pitch durumu) x 31 (Yaw durumu) x 5 (Aksiyon) boyutunda bir matris.
+# Aksiyonlar: 0:Pitch Down, 1:Pitch Up, 2:Yaw Left, 3:Yaw Right, 4:Steady
+q_table = np.zeros((51, 31, 5))
+
+def get_state_index(pitch, yaw):
+    """Sürekli açı değerlerini Q-tablosunda kullanılmak üzere tam sayı indekslerine çevirir."""
+    p_idx = int(np.clip((pitch + PITCH_LIMIT) / 2, 0, 50))
+    y_idx = int(np.clip((yaw + YAW_LIMIT) / 2, 0, 30))
+    return p_idx, y_idx
+
+# Veri analizi için boş listeler
+total_rewards = []
+avg_rewards = []
+pitch_history = []
+yaw_history = []
+disturbance_history = []
+epsilon_history = []
+
+# --- 2. EĞİTİM DÖNGÜSÜ (Öğrenme Burada Gerçekleştiriyoruz) ---
+print(f"Uçak Eğitiliyor... Sınırlar: Pitch (+/-{PITCH_LIMIT}), Yaw (+/-{YAW_LIMIT})")
+
+current_epsilon = epsilon_start
+
+for ep in range(episodes):
+    # Her bölümde uçak rastgele bir dengesiz konumda başlar
+    p = random.uniform(-PITCH_LIMIT + 5, PITCH_LIMIT - 5)
+    y = random.uniform(-YAW_LIMIT + 5, YAW_LIMIT - 5)
+    episode_reward = 0
+    
+    # Epsilon sönümleme: Zamanla rastgeleliği azalt, öğrenilen bilgiye güven
+    current_epsilon = max(epsilon_final, current_epsilon * decay_rate)
+    epsilon_history.append(current_epsilon)
+    
+    for step in range(steps):
+        s_p, s_y = get_state_index(p, y) # Mevcut durumu (state) al
+        
+        # --- [AKSİYON SEÇİMİ: EPSILON-GREEDY] ---
+        if random.random() < current_epsilon:
+            a = random.randint(0, 4) # Keşfet: Rastgele aksiyon seç
+        else:
+            a = np.argmax(q_table[s_p, s_y]) # Sömür (Exploit): En iyi bilinen aksiyonu seç
+            
+        # AKSİYONLARIN FİZİKSEL ETKİSİ
+        change = 3.0 
+        dp = change if a == 1 else -change if a == 0 else 0 # Pitch değişimi
+        dy = change if a == 3 else -change if a == 2 else 0 # Yaw değişimi
+        
+        # DIŞ ETKEN: Rüzgar simülasyonu (Sisteme gürültü ekler)
+        noise_p = random.uniform(-2.0, 2.0)
+        noise_y = random.uniform(-1.5, 1.5)
+        
+        # YENİ DURUMUN HESAPLANMASI (s')
+        new_p = np.clip(p + dp + noise_p, -PITCH_LIMIT, PITCH_LIMIT)
+        new_y = np.clip(y + dy + noise_y, -YAW_LIMIT, YAW_LIMIT)
+        next_s_p, next_s_y = get_state_index(new_p, new_y)
+        
+        # --- [ÖDÜL FONKSİYONU] ---
+        # 1. Mesafe Cezası: Merkeze (0,0) ne kadar uzaksa o kadar negatif ödül.
+        dist_reward = -(new_p**2 + new_y**2) 
+        # 2. Kararlılık Cezası: Ani hareketleri ve titremeyi cezalandırır.
+        stability_reward = -abs(new_p - p) - abs(new_y - y)
+        # 3. Aksiyon Ödülü: Gereksiz manevradan kaçınıp sabit (steady) kalırsa ödüllendir.
+        action_penalty = -0.5 if a != 4 else 1.0 
+        
+        r = dist_reward + (1.5 * stability_reward) + action_penalty
+        episode_reward += r
+        
+        # --- [Q-ALGORİTMASI: BELLMAN DENKLEMİ GÜNCELLEME] ---
+        q_sa = q_table[s_p, s_y, a] # Mevcut Q değeri
+        max_q_s_prime = np.max(q_table[next_s_p, next_s_y]) # Gelecekteki en iyi olası Q değeri
+        
+        # Q-Öğrenme Formülü: Q(s,a) = Q(s,a) + alpha * [Reward + gamma * maxQ(s',a') - Q(s,a)]
+        q_table[s_p, s_y, a] = q_sa + alpha * (r + gamma * max_q_s_prime - q_sa)
+        
+        # Son bölümde verileri kaydet (Grafik çizimi için)
+        if ep == episodes - 1:
+            pitch_history.append(new_p)
+            yaw_history.append(new_y)
+            disturbance_history.append(noise_p + noise_y)
+            
+        p, y = new_p, new_y # Durumu güncelle
+        
+    total_rewards.append(episode_reward)
+    avg_rewards.append(np.mean(total_rewards[-100:])) # Son 100 bölümün ortalama ödülü
+
+print("Eğitim Tamamlandı.")
+
+# --- 3. ANALİZ GRAFİKLERİ ---
+# Bu bölüm öğrenme sürecinin başarısını görselleştirir.
+plt.figure(figsize=(18, 10))
+
+plt.subplot(2, 3, 1) # Epsilon'un zamanla nasıl düştüğünü gösterir
+plt.plot(epsilon_history, color='purple')
+plt.title("Epsilon Sönümleme")
+
+plt.subplot(2, 3, 2) # Ajanın aldığı ödüllerin artışını (öğrenmeyi) gösterir
+plt.plot(total_rewards, alpha=0.1); plt.plot(avg_rewards, color='red')
+plt.title("Eğitim Ödül Grafiği")
+
+plt.subplot(2, 3, 3) # Uçağın son bölümde 0 derecede kalıp kalamadığını gösterir
+plt.plot(pitch_history, label='Pitch', color='blue')
+plt.plot(yaw_history, label='Yaw', color='green')
+plt.axhline(0, color='black', ls='--')
+plt.ylim(-60, 60)
+plt.title(f"Açı Grafikleri (Sınırlar: +/-{PITCH_LIMIT}, +/-{YAW_LIMIT})")
+plt.legend()
+
+plt.subplot(2, 3, 4) # Uygulanan rastgele rüzgar kuvvetleri
+plt.bar(range(len(disturbance_history)), disturbance_history, color='orange')
+plt.title("Dış Etmen (Rüzgar) Şiddeti")
+
+plt.subplot(2, 3, 5) # Uçağın koordinat düzlemindeki hareket izi
+plt.scatter(pitch_history, yaw_history, c=range(len(pitch_history)), cmap='inferno')
+plt.axhline(0, color='blue', alpha=0.2); plt.axvline(0, color='blue', alpha=0.2)
+plt.title("Uçağın Denge Rotası")
+
+plt.tight_layout()
+plt.show()
+
+# --- 4. CANLI SİMÜLASYON ANİMASYONU ---
+# Eğitilmiş Q-tablosunu kullanarak uçağın anlık nasıl tepki verdiğini görselleştirir.
+fig_anim, ax_anim = plt.subplots(figsize=(8, 6))
+ax_anim.set_xlim(-PITCH_LIMIT-5, PITCH_LIMIT+5)
+ax_anim.set_ylim(-YAW_LIMIT-5, YAW_LIMIT+5)
+ax_anim.axhline(0, color='black', alpha=0.3); ax_anim.axvline(0, color='black', alpha=0.3)
+ax_anim.set_title("Uçak Denge Simülasyonu (Genişletilmiş Alan)")
+
+plane_dot, = ax_anim.plot([], [], 'bo', ms=20) # Uçağı temsil eden mavi nokta
+action_text = ax_anim.text(-PITCH_LIMIT+2, -YAW_LIMIT+2, '', color='blue', fontweight='bold')
+action_names = ["Pitch Down", "Pitch Up", "Yaw Left", "Yaw Right", "Steady"]
+
+# Başlangıç konumu
+curr_p, curr_y = random.uniform(-PITCH_LIMIT+10, PITCH_LIMIT-10), random.uniform(-YAW_LIMIT+10, YAW_LIMIT-10)
+
+def update_sim(frame):
+    """Her animasyon karesinde uçağın konumunu eğitilmiş Q-tablosuna göre günceller."""
+    global curr_p, curr_y
+    idx_p, idx_y = get_state_index(curr_p, curr_y)
+    
+    # EĞİTİLMİŞ MODELİ KULLAN: Mevcut konum için en iyi hamleyi tablodan seç
+    a = np.argmax(q_table[idx_p, idx_y])
+    
+    # Rüzgar ve Aksiyon etkisi
+    w_p, w_y = random.uniform(-3.0, 3.0), random.uniform(-2.5, 2.5)
+    dp = 3.5 if a == 1 else -3.5 if a == 0 else 0
+    dy = 3.5 if a == 3 else -3.5 if a == 2 else 0
+    
+    # Yeni koordinatlar
+    curr_p = np.clip(curr_p + dp + w_p, -PITCH_LIMIT, PITCH_LIMIT)
+    curr_y = np.clip(curr_y + dy + w_y, -YAW_LIMIT, YAW_LIMIT)
+    
+    plane_dot.set_data([curr_p], [curr_y])
+    action_text.set_text(f"Manevra: {action_names[a]}")
+    return plane_dot, action_text
+
+# Animasyonu oluşturma ve gösterme kısmımız
+ani = FuncAnimation(fig_anim, update_sim, frames=120, interval=100, blit=True)
+plt.close(fig_anim)
+HTML(ani.to_jshtml())
